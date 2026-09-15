@@ -19,7 +19,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 init_db()
 init_chunks_db()
 
-st.set_page_config(page_title="Assistant RAG", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Assistant RAG_llms", page_icon="🤖", layout="wide")
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
