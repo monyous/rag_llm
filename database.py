@@ -25,12 +25,21 @@ def init_chunks_db():
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS chat_history (
+        CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT 'Nouvelle conversation',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
         )
     """)
     conn.commit()
@@ -62,7 +71,6 @@ def add_chunk(document_id: int, chunk_text: str, embedding_blob: bytes):
 
 
 def get_all_chunks(username: str):
-    """Récupère tous les chunks + embeddings appartenant aux documents d'un utilisateur."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -88,23 +96,67 @@ def get_user_documents(username: str):
     return rows
 
 
-def save_message(username: str, role: str, content: str):
+# ---------- Gestion des sessions de chat ----------
+
+def create_session(username: str, title: str = "Nouvelle conversation") -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO chat_history (username, role, content) VALUES (?, ?, ?)",
-        (username, role, content)
+        "INSERT INTO sessions (username, title) VALUES (?, ?)",
+        (username, title)
+    )
+    session_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return session_id
+
+
+def get_sessions(username: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, title, created_at FROM sessions WHERE username = ? ORDER BY created_at DESC",
+        (username,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def update_session_title(session_id: int, title: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_session(session_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+    cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_message(session_id: int, role: str, content: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO chat_history (session_id, role, content) VALUES (?, ?, ?)",
+        (session_id, role, content)
     )
     conn.commit()
     conn.close()
 
 
-def get_chat_history(username: str):
+def get_session_messages(session_id: int):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT role, content FROM chat_history WHERE username = ? ORDER BY created_at ASC",
-        (username,)
+        "SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY created_at ASC",
+        (session_id,)
     )
     rows = cursor.fetchall()
     conn.close()
