@@ -25,6 +25,14 @@ def init_chunks_db():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL,
@@ -42,6 +50,14 @@ def init_chunks_db():
             FOREIGN KEY (session_id) REFERENCES sessions(id)
         )
     """)
+
+    # Ajoute la colonne project_id à sessions si elle n'existe pas encore
+    # (évite de perdre tes documents/conversations déjà en base)
+    cursor.execute("PRAGMA table_info(sessions)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "project_id" not in columns:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN project_id INTEGER")
+
     conn.commit()
     conn.close()
 
@@ -96,14 +112,51 @@ def get_user_documents(username: str):
     return rows
 
 
-# ---------- Gestion des sessions de chat ----------
+# ---------- Projets ----------
 
-def create_session(username: str, title: str = "Nouvelle conversation") -> int:
+def create_project(username: str, name: str) -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO sessions (username, title) VALUES (?, ?)",
-        (username, title)
+        "INSERT INTO projects (username, name) VALUES (?, ?)",
+        (username, name)
+    )
+    project_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return project_id
+
+
+def get_projects(username: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, name FROM projects WHERE username = ? ORDER BY created_at DESC",
+        (username,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_project(project_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Les conversations du projet redeviennent "sans projet" plutôt que d'être supprimées
+    cursor.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (project_id,))
+    cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Sessions de chat ----------
+
+def create_session(username: str, title: str = "Nouvelle conversation", project_id: int = None) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO sessions (username, title, project_id) VALUES (?, ?, ?)",
+        (username, title, project_id)
     )
     session_id = cursor.lastrowid
     conn.commit()
@@ -112,10 +165,11 @@ def create_session(username: str, title: str = "Nouvelle conversation") -> int:
 
 
 def get_sessions(username: str):
+    """Retourne toutes les sessions, avec leur project_id (None si pas de projet)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, title, created_at FROM sessions WHERE username = ? ORDER BY created_at DESC",
+        "SELECT id, title, created_at, project_id FROM sessions WHERE username = ? ORDER BY created_at DESC",
         (username,)
     )
     rows = cursor.fetchall()

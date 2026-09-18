@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import base64
+from io import BytesIO
+from PIL import Image
 from dotenv import load_dotenv
 from groq import Groq
 from pypdf import PdfReader
@@ -9,7 +11,8 @@ from auth import init_db, register_user, login_user
 from database import (
     init_chunks_db, add_document, add_chunk, get_all_chunks,
     get_user_documents, create_session, get_sessions,
-    update_session_title, delete_session, save_message, get_session_messages
+    update_session_title, delete_session, save_message, get_session_messages,
+    create_project, get_projects, delete_project
 )
 from embedding import embed_texts, vector_to_blob, chunk_text, find_relevant_chunks
 
@@ -19,7 +22,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 init_db()
 init_chunks_db()
 
-st.set_page_config(page_title="Assistant RAG_llms_mondher", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Assistant RAG", page_icon="🤖", layout="wide")
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -93,7 +96,12 @@ def process_uploaded_file(uploaded_file, username: str):
 
 
 def encode_image_to_base64(uploaded_image) -> str:
-    return base64.b64encode(uploaded_image.getvalue()).decode("utf-8")
+    image = Image.open(uploaded_image)
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=90)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
 def ensure_active_session(username: str):
@@ -105,8 +113,8 @@ def ensure_active_session(username: str):
             st.session_state.current_session_id = create_session(username)
 
 
-def start_new_chat(username: str):
-    new_id = create_session(username)
+def start_new_chat(username: str, project_id: int = None):
+    new_id = create_session(username, project_id=project_id)
     st.session_state.current_session_id = new_id
     st.session_state.pending_image = None
     st.rerun()
@@ -118,9 +126,26 @@ def switch_session(session_id: int):
     st.rerun()
 
 
+def render_session_row(session_id, title, is_current):
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        label = f"**{title}**" if is_current else title
+        if st.button(label, key=f"session_{session_id}", use_container_width=True):
+            switch_session(session_id)
+    with col2:
+        if st.button("🗑️", key=f"delete_{session_id}"):
+            delete_session(session_id)
+            if st.session_state.current_session_id == session_id:
+                st.session_state.current_session_id = None
+            st.rerun()
+
+
 def show_chat_page():
     username = st.session_state.username
     ensure_active_session(username)
+
+    all_sessions = get_sessions(username)  # (id, title, created_at, project_id)
+    all_projects = get_projects(username)  # (id, name)
 
     with st.sidebar:
         st.header(f"👤 {username}")
@@ -135,21 +160,37 @@ def show_chat_page():
         if st.button("➕ Nouvelle conversation", use_container_width=True):
             start_new_chat(username)
 
-        st.subheader("🕓 Historique")
-        sessions = get_sessions(username)
-        for session_id, title, created_at in sessions:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                is_current = session_id == st.session_state.current_session_id
-                label = f"**{title}**" if is_current else title
-                if st.button(label, key=f"session_{session_id}", use_container_width=True):
-                    switch_session(session_id)
-            with col2:
-                if st.button("🗑️", key=f"delete_{session_id}"):
-                    delete_session(session_id)
-                    if st.session_state.current_session_id == session_id:
-                        st.session_state.current_session_id = None
+        st.divider()
+        st.subheader("📁 Projets")
+
+        with st.expander("➕ Créer un nouveau projet"):
+            new_project_name = st.text_input("Nom du projet", key="new_project_name")
+            if st.button("Créer", key="create_project_btn"):
+                if new_project_name.strip():
+                    create_project(username, new_project_name.strip())
                     st.rerun()
+
+        for project_id, project_name in all_projects:
+            project_sessions = [s for s in all_sessions if s[3] == project_id]
+            with st.expander(f"📁 {project_name} ({len(project_sessions)})"):
+                if st.button("➕ Nouvelle conversation ici", key=f"new_in_project_{project_id}"):
+                    start_new_chat(username, project_id=project_id)
+
+                for session_id, title, created_at, s_project_id in project_sessions:
+                    render_session_row(session_id, title, session_id == st.session_state.current_session_id)
+
+                if st.button("🗑️ Supprimer ce projet", key=f"delete_project_{project_id}"):
+                    delete_project(project_id)
+                    st.rerun()
+
+        st.divider()
+        st.subheader("🕓 Conversations")
+        no_project_sessions = [s for s in all_sessions if s[3] is None]
+        if no_project_sessions:
+            for session_id, title, created_at, s_project_id in no_project_sessions:
+                render_session_row(session_id, title, session_id == st.session_state.current_session_id)
+        else:
+            st.caption("Aucune conversation hors projet.")
 
         st.divider()
         st.subheader("📄 Ajouter un document")
@@ -174,7 +215,7 @@ def show_chat_page():
             st.markdown(content)
 
     uploaded_image = st.file_uploader(
-        "🖼️ Joindre une image (optionnel)", type=["png", "jpg", "jpeg","avif"], key="image_uploader"
+        "🖼️ Joindre une image (optionnel)", type=["png", "jpg", "jpeg"], key="image_uploader"
     )
     if uploaded_image is not None:
         st.session_state.pending_image = uploaded_image
@@ -184,8 +225,8 @@ def show_chat_page():
     if prompt:
         session_id = st.session_state.current_session_id
 
-        current_sessions = {s[0]: s[1] for s in get_sessions(username)}
-        if current_sessions.get(session_id) == "Nouvelle conversation":
+        current_titles = {s[0]: s[1] for s in get_sessions(username)}
+        if current_titles.get(session_id) == "Nouvelle conversation":
             new_title = prompt[:40] + ("..." if len(prompt) > 40 else "")
             update_session_title(session_id, new_title)
 
@@ -198,7 +239,7 @@ def show_chat_page():
         with st.chat_message("assistant"):
             if st.session_state.pending_image is not None:
                 image_b64 = encode_image_to_base64(st.session_state.pending_image)
-                mime = st.session_state.pending_image.type
+                mime = "image/jpeg"
 
                 response = client.chat.completions.create(
                     model="qwen/qwen3.8-27b",
