@@ -1,0 +1,17 @@
+langchain
+langchain-community
+langchain-openai
+langchain-huggingface
+chromadb
+sentence-transformers
+openai
+transformers
+torch
+pypdf
+python-docx
+beautifulsoup4
+faiss-cpu
+python-dotenv
+streamlit
+fastapi
+uvicorn
