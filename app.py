@@ -24,6 +24,11 @@ init_chunks_db()
 
 st.set_page_config(page_title="Assistant RAG", page_icon="🤖", layout="wide")
 
+MODEL_OPTIONS = {
+    "🧠 Texte — gpt-oss-120b (rapide, pour RAG et discussion)": "openai/gpt-oss-120b",
+    "👁️ Vision — qwen3.8-27b (texte + images)": "qwen/qwen3.8-27b",
+}
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = None
@@ -31,6 +36,8 @@ if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = None
 if "pending_image" not in st.session_state:
     st.session_state.pending_image = None
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
 
 
 def show_login_page():
@@ -73,7 +80,7 @@ def extract_text_from_pdf(uploaded_file) -> str:
     return text
 
 
-def process_uploaded_file(uploaded_file, username: str):
+def process_uploaded_file(uploaded_file, username: str, project_id: int = None):
     if uploaded_file.type == "application/pdf":
         text = extract_text_from_pdf(uploaded_file)
     else:
@@ -83,7 +90,7 @@ def process_uploaded_file(uploaded_file, username: str):
         st.error("Impossible d'extraire du texte de ce fichier.")
         return
 
-    doc_id = add_document(username, uploaded_file.name)
+    doc_id = add_document(username, uploaded_file.name, project_id=project_id)
     chunks = chunk_text(text, chunk_size=200, overlap=30)
 
     with st.spinner(f"Traitement de {len(chunks)} morceaux de texte..."):
@@ -102,6 +109,17 @@ def encode_image_to_base64(uploaded_image) -> str:
     buffer = BytesIO()
     image.save(buffer, format="JPEG", quality=90)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def transcribe_audio(audio_value) -> str:
+    """Envoie l'audio à Whisper (Groq) et retourne le texte transcrit."""
+    transcription = client.audio.transcriptions.create(
+        file=("audio.wav", audio_value.getvalue()),
+        model="whisper-large-v3-turbo",
+        language="fr",
+        response_format="json",
+    )
+    return transcription.text
 
 
 def ensure_active_session(username: str):
@@ -140,12 +158,27 @@ def render_session_row(session_id, title, is_current):
             st.rerun()
 
 
+def get_current_project(all_sessions, all_projects, current_session_id):
+    for session_id, title, created_at, project_id in all_sessions:
+        if session_id == current_session_id:
+            if project_id is None:
+                return None, None
+            for pid, pname in all_projects:
+                if pid == project_id:
+                    return pid, pname
+            return project_id, "Projet inconnu"
+    return None, None
+
+
 def show_chat_page():
     username = st.session_state.username
     ensure_active_session(username)
 
-    all_sessions = get_sessions(username)  # (id, title, created_at, project_id)
-    all_projects = get_projects(username)  # (id, name)
+    all_sessions = get_sessions(username)
+    all_projects = get_projects(username)
+    current_project_id, current_project_name = get_current_project(
+        all_sessions, all_projects, st.session_state.current_session_id
+    )
 
     with st.sidebar:
         st.header(f"👤 {username}")
@@ -172,7 +205,12 @@ def show_chat_page():
 
         for project_id, project_name in all_projects:
             project_sessions = [s for s in all_sessions if s[3] == project_id]
-            with st.expander(f"📁 {project_name} ({len(project_sessions)})"):
+            is_active_project = project_id == current_project_id
+            expander_label = f"📁 {project_name} ({len(project_sessions)})"
+            if is_active_project:
+                expander_label = f"➡️ {expander_label} — actif"
+
+            with st.expander(expander_label, expanded=is_active_project):
                 if st.button("➕ Nouvelle conversation ici", key=f"new_in_project_{project_id}"):
                     start_new_chat(username, project_id=project_id)
 
@@ -184,7 +222,7 @@ def show_chat_page():
                     st.rerun()
 
         st.divider()
-        st.subheader("🕓 Conversations")
+        st.subheader("🕓 Conversations générales")
         no_project_sessions = [s for s in all_sessions if s[3] is None]
         if no_project_sessions:
             for session_id, title, created_at, s_project_id in no_project_sessions:
@@ -193,35 +231,68 @@ def show_chat_page():
             st.caption("Aucune conversation hors projet.")
 
         st.divider()
-        st.subheader("📄 Ajouter un document")
+        doc_scope_label = f"projet « {current_project_name} »" if current_project_id else "conversation générale"
+        st.subheader(f"📄 Documents ({doc_scope_label})")
         uploaded_file = st.file_uploader("Fichier (PDF/TXT)", type=["pdf", "txt"], key="doc_uploader")
         if uploaded_file is not None:
             if st.button("Traiter ce fichier"):
-                process_uploaded_file(uploaded_file, username)
+                process_uploaded_file(uploaded_file, username, project_id=current_project_id)
 
-        st.subheader("📚 Tes documents")
-        docs = get_user_documents(username)
+        docs = get_user_documents(username, project_id=current_project_id)
         if docs:
             for filename, uploaded_at in docs:
                 st.text(f"• {filename}")
         else:
-            st.caption("Aucun document ajouté.")
+            st.caption("Aucun document dans ce contexte.")
 
-    st.title("🤖 Assistant RAG")
+    if current_project_id:
+        st.info(f"📁 Tu travailles actuellement dans le projet **{current_project_name}**")
+    else:
+        st.caption("💬 Conversation générale (hors projet)")
+
+    col_title, col_model = st.columns([3, 2])
+    with col_title:
+        st.title("🤖 Assistant RAG")
+    with col_model:
+        selected_label = st.selectbox(
+            "Modèle utilisé",
+            list(MODEL_OPTIONS.keys()),
+            key="model_choice",
+        )
+    model_id = MODEL_OPTIONS[selected_label]
 
     messages = get_session_messages(st.session_state.current_session_id)
     for role, content in messages:
         with st.chat_message(role):
             st.markdown(content)
 
-    uploaded_image = st.file_uploader(
-        "🖼️ Joindre une image (optionnel)", type=["png", "jpg", "jpeg"], key="image_uploader"
-    )
-    if uploaded_image is not None:
-        st.session_state.pending_image = uploaded_image
-        st.image(uploaded_image, width=200, caption="Image prête à être envoyée")
+    col_img, col_audio = st.columns(2)
+
+    with col_img:
+        uploaded_image = st.file_uploader(
+            "🖼️ Joindre une image (bascule sur le modèle vision)",
+            type=["png", "jpg", "jpeg"], key="image_uploader"
+        )
+        if uploaded_image is not None:
+            st.session_state.pending_image = uploaded_image
+            st.image(uploaded_image, width=200, caption="Image prête à être envoyée")
+
+    with col_audio:
+        st.markdown("🎤 **Message vocal**")
+        audio_value = st.audio_input("Enregistre ta question", key="audio_input")
+        if audio_value is not None:
+            if st.button("📝 Transcrire et envoyer ce message"):
+                with st.spinner("Transcription en cours..."):
+                    text = transcribe_audio(audio_value)
+                st.session_state.pending_prompt = text
+                st.rerun()
 
     prompt = st.chat_input("Pose ta question...")
+
+    if not prompt and st.session_state.pending_prompt:
+        prompt = st.session_state.pending_prompt
+        st.session_state.pending_prompt = None
+
     if prompt:
         session_id = st.session_state.current_session_id
 
@@ -239,7 +310,6 @@ def show_chat_page():
         with st.chat_message("assistant"):
             if st.session_state.pending_image is not None:
                 image_b64 = encode_image_to_base64(st.session_state.pending_image)
-                mime = "image/jpeg"
 
                 response = client.chat.completions.create(
                     model="qwen/qwen3.8-27b",
@@ -254,7 +324,7 @@ def show_chat_page():
                                 {"type": "text", "text": prompt},
                                 {
                                     "type": "image_url",
-                                    "image_url": {"url": f"data:{mime};base64,{image_b64}"},
+                                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
                                 },
                             ],
                         },
@@ -265,7 +335,7 @@ def show_chat_page():
                 st.session_state.pending_image = None
 
             else:
-                all_chunks = get_all_chunks(username)
+                all_chunks = get_all_chunks(username, project_id=current_project_id)
                 if all_chunks:
                     relevant = find_relevant_chunks(prompt, all_chunks, top_k=3)
                     context = "\n\n---\n\n".join(relevant)
@@ -277,12 +347,12 @@ def show_chat_page():
                     )
                 else:
                     system_prompt = (
-                        "Tu es un assistant. Aucun document n'a encore été ajouté, "
+                        "Tu es un assistant. Aucun document n'a encore été ajouté dans ce contexte, "
                         "réponds avec tes connaissances générales et précise-le."
                     )
 
                 response = client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
+                    model=model_id,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt},

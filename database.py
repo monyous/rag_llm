@@ -51,23 +51,27 @@ def init_chunks_db():
         )
     """)
 
-    # Ajoute la colonne project_id à sessions si elle n'existe pas encore
-    # (évite de perdre tes documents/conversations déjà en base)
+    # Migrations douces : ajoute les colonnes manquantes sans perdre les données existantes
     cursor.execute("PRAGMA table_info(sessions)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if "project_id" not in columns:
+    session_cols = [col[1] for col in cursor.fetchall()]
+    if "project_id" not in session_cols:
         cursor.execute("ALTER TABLE sessions ADD COLUMN project_id INTEGER")
+
+    cursor.execute("PRAGMA table_info(documents)")
+    doc_cols = [col[1] for col in cursor.fetchall()]
+    if "project_id" not in doc_cols:
+        cursor.execute("ALTER TABLE documents ADD COLUMN project_id INTEGER")
 
     conn.commit()
     conn.close()
 
 
-def add_document(username: str, filename: str) -> int:
+def add_document(username: str, filename: str, project_id: int = None) -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO documents (username, filename) VALUES (?, ?)",
-        (username, filename)
+        "INSERT INTO documents (username, filename, project_id) VALUES (?, ?, ?)",
+        (username, filename, project_id)
     )
     doc_id = cursor.lastrowid
     conn.commit()
@@ -86,27 +90,42 @@ def add_chunk(document_id: int, chunk_text: str, embedding_blob: bytes):
     conn.close()
 
 
-def get_all_chunks(username: str):
+def get_all_chunks(username: str, project_id: int = None):
+    """Ne retourne que les chunks des documents du projet actuel (ou hors-projet si project_id=None)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT chunks.id, chunks.chunk_text, chunks.embedding
-        FROM chunks
-        JOIN documents ON chunks.document_id = documents.id
-        WHERE documents.username = ?
-    """, (username,))
+    if project_id is None:
+        cursor.execute("""
+            SELECT chunks.id, chunks.chunk_text, chunks.embedding
+            FROM chunks
+            JOIN documents ON chunks.document_id = documents.id
+            WHERE documents.username = ? AND documents.project_id IS NULL
+        """, (username,))
+    else:
+        cursor.execute("""
+            SELECT chunks.id, chunks.chunk_text, chunks.embedding
+            FROM chunks
+            JOIN documents ON chunks.document_id = documents.id
+            WHERE documents.username = ? AND documents.project_id = ?
+        """, (username, project_id))
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 
-def get_user_documents(username: str):
+def get_user_documents(username: str, project_id: int = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT filename, uploaded_at FROM documents WHERE username = ? ORDER BY uploaded_at DESC",
-        (username,)
-    )
+    if project_id is None:
+        cursor.execute(
+            "SELECT filename, uploaded_at FROM documents WHERE username = ? AND project_id IS NULL ORDER BY uploaded_at DESC",
+            (username,)
+        )
+    else:
+        cursor.execute(
+            "SELECT filename, uploaded_at FROM documents WHERE username = ? AND project_id = ? ORDER BY uploaded_at DESC",
+            (username, project_id)
+        )
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -117,10 +136,7 @@ def get_user_documents(username: str):
 def create_project(username: str, name: str) -> int:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO projects (username, name) VALUES (?, ?)",
-        (username, name)
-    )
+    cursor.execute("INSERT INTO projects (username, name) VALUES (?, ?)", (username, name))
     project_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -130,10 +146,7 @@ def create_project(username: str, name: str) -> int:
 def get_projects(username: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, name FROM projects WHERE username = ? ORDER BY created_at DESC",
-        (username,)
-    )
+    cursor.execute("SELECT id, name FROM projects WHERE username = ? ORDER BY created_at DESC", (username,))
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -142,8 +155,8 @@ def get_projects(username: str):
 def delete_project(project_id: int):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Les conversations du projet redeviennent "sans projet" plutôt que d'être supprimées
     cursor.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (project_id,))
+    cursor.execute("UPDATE documents SET project_id = NULL WHERE project_id = ?", (project_id,))
     cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     conn.commit()
     conn.close()
@@ -165,7 +178,6 @@ def create_session(username: str, title: str = "Nouvelle conversation", project_
 
 
 def get_sessions(username: str):
-    """Retourne toutes les sessions, avec leur project_id (None si pas de projet)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
