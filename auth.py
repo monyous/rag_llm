@@ -2,7 +2,7 @@ import sqlite3
 import bcrypt
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "users.db"
+DB_PATH = "users.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

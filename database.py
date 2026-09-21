@@ -1,8 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "rag.db"
-
+DB_PATH ="rag.db"
 
 def init_chunks_db():
     conn = sqlite3.connect(DB_PATH)

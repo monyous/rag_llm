@@ -34,8 +34,6 @@ if "logged_in" not in st.session_state:
     st.session_state.username = None
 if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = None
-if "pending_image" not in st.session_state:
-    st.session_state.pending_image = None
 if "pending_prompt" not in st.session_state:
     st.session_state.pending_prompt = None
 
@@ -112,7 +110,6 @@ def encode_image_to_base64(uploaded_image) -> str:
 
 
 def transcribe_audio(audio_value) -> str:
-    """Envoie l'audio à Whisper (Groq) et retourne le texte transcrit."""
     transcription = client.audio.transcriptions.create(
         file=("audio.wav", audio_value.getvalue()),
         model="whisper-large-v3-turbo",
@@ -134,13 +131,11 @@ def ensure_active_session(username: str):
 def start_new_chat(username: str, project_id: int = None):
     new_id = create_session(username, project_id=project_id)
     st.session_state.current_session_id = new_id
-    st.session_state.pending_image = None
     st.rerun()
 
 
 def switch_session(session_id: int):
     st.session_state.current_session_id = session_id
-    st.session_state.pending_image = None
     st.rerun()
 
 
@@ -168,6 +163,57 @@ def get_current_project(all_sessions, all_projects, current_session_id):
                     return pid, pname
             return project_id, "Projet inconnu"
     return None, None
+
+
+def answer_with_text_model(prompt, username, project_id, model_id):
+    all_chunks = get_all_chunks(username, project_id=project_id)
+    if all_chunks:
+        relevant = find_relevant_chunks(prompt, all_chunks, top_k=3)
+        context = "\n\n---\n\n".join(relevant)
+        system_prompt = (
+            "Tu es un assistant qui répond aux questions en te basant "
+            "uniquement sur le contexte fourni ci-dessous. Si la réponse "
+            "n'est pas dans le contexte, dis-le clairement.\n\n"
+            f"Contexte:\n{context}"
+        )
+    else:
+        system_prompt = (
+            "Tu es un assistant. Aucun document n'a encore été ajouté dans ce contexte, "
+            "réponds avec tes connaissances générales et précise-le."
+        )
+
+    response = client.chat.completions.create(
+        model=model_id,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return response.choices[0].message.content
+
+
+def answer_with_vision_model(prompt, image_file):
+    image_b64 = encode_image_to_base64(image_file)
+    response = client.chat.completions.create(
+        model="qwen/qwen3.8-27b",
+        messages=[
+            {
+                "role": "system",
+                "content": "Tu réponds TOUJOURS en français, quelle que soit la langue de l'image ou du contenu analysé.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                    },
+                ],
+            },
+        ],
+    )
+    return response.choices[0].message.content
 
 
 def show_chat_page():
@@ -254,11 +300,7 @@ def show_chat_page():
     with col_title:
         st.title("🤖 Assistant RAG")
     with col_model:
-        selected_label = st.selectbox(
-            "Modèle utilisé",
-            list(MODEL_OPTIONS.keys()),
-            key="model_choice",
-        )
+        selected_label = st.selectbox("Modèle utilisé", list(MODEL_OPTIONS.keys()), key="model_choice")
     model_id = MODEL_OPTIONS[selected_label]
 
     messages = get_session_messages(st.session_state.current_session_id)
@@ -266,30 +308,34 @@ def show_chat_page():
         with st.chat_message(role):
             st.markdown(content)
 
-    col_img, col_audio = st.columns(2)
+    # ---- Barre d'outils compacte au-dessus de la saisie : micro seulement ----
+    _, col_mic = st.columns([9, 1])
+    with col_mic:
+        with st.popover("🎤"):
+            st.caption("Enregistre un message vocal")
+            audio_value = st.audio_input("Micro", key="audio_input", label_visibility="collapsed")
+            if audio_value is not None:
+                if st.button("Transcrire et envoyer"):
+                    with st.spinner("Transcription..."):
+                        text = transcribe_audio(audio_value)
+                    st.session_state.pending_prompt = text
+                    st.rerun()
 
-    with col_img:
-        uploaded_image = st.file_uploader(
-            "🖼️ Joindre une image (bascule sur le modèle vision)",
-            type=["png", "jpg", "jpeg"], key="image_uploader"
-        )
-        if uploaded_image is not None:
-            st.session_state.pending_image = uploaded_image
-            st.image(uploaded_image, width=200, caption="Image prête à être envoyée")
+    # ---- Barre de saisie unique avec trombone intégré pour les images ----
+    user_input = st.chat_input(
+        "Pose ta question, ou joins une image avec le trombone...",
+        accept_file=True,
+        file_type=["png", "jpg", "jpeg"],
+    )
 
-    with col_audio:
-        st.markdown("🎤 **Message vocal**")
-        audio_value = st.audio_input("Enregistre ta question", key="audio_input")
-        if audio_value is not None:
-            if st.button("📝 Transcrire et envoyer ce message"):
-                with st.spinner("Transcription en cours..."):
-                    text = transcribe_audio(audio_value)
-                st.session_state.pending_prompt = text
-                st.rerun()
+    prompt = None
+    image_file = None
 
-    prompt = st.chat_input("Pose ta question...")
-
-    if not prompt and st.session_state.pending_prompt:
+    if user_input:
+        prompt = user_input.text
+        if user_input.files:
+            image_file = user_input.files[0]
+    elif st.session_state.pending_prompt:
         prompt = st.session_state.pending_prompt
         st.session_state.pending_prompt = None
 
@@ -304,62 +350,15 @@ def show_chat_page():
         save_message(session_id, "user", prompt)
         with st.chat_message("user"):
             st.markdown(prompt)
-            if st.session_state.pending_image:
-                st.image(st.session_state.pending_image, width=200)
+            if image_file:
+                st.image(image_file, width=200)
 
         with st.chat_message("assistant"):
-            if st.session_state.pending_image is not None:
-                image_b64 = encode_image_to_base64(st.session_state.pending_image)
-
-                response = client.chat.completions.create(
-                    model="qwen/qwen3.8-27b",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "Tu réponds TOUJOURS en français, quelle que soit la langue de l'image ou du contenu analysé.",
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                                },
-                            ],
-                        },
-                    ],
-                )
-                answer = response.choices[0].message.content
-                st.markdown(answer)
-                st.session_state.pending_image = None
-
+            if image_file is not None:
+                answer = answer_with_vision_model(prompt, image_file)
             else:
-                all_chunks = get_all_chunks(username, project_id=current_project_id)
-                if all_chunks:
-                    relevant = find_relevant_chunks(prompt, all_chunks, top_k=3)
-                    context = "\n\n---\n\n".join(relevant)
-                    system_prompt = (
-                        "Tu es un assistant qui répond aux questions en te basant "
-                        "uniquement sur le contexte fourni ci-dessous. Si la réponse "
-                        "n'est pas dans le contexte, dis-le clairement.\n\n"
-                        f"Contexte:\n{context}"
-                    )
-                else:
-                    system_prompt = (
-                        "Tu es un assistant. Aucun document n'a encore été ajouté dans ce contexte, "
-                        "réponds avec tes connaissances générales et précise-le."
-                    )
-
-                response = client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                answer = response.choices[0].message.content
-                st.markdown(answer)
+                answer = answer_with_text_model(prompt, username, current_project_id, model_id)
+            st.markdown(answer)
 
         save_message(session_id, "assistant", answer)
         st.rerun()
