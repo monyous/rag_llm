@@ -29,13 +29,17 @@ MODEL_OPTIONS = {
     "👁️ Vision — qwen3.8-27b (texte + images)": "qwen/qwen3.8-27b",
 }
 
+DEFAULT_IMAGE_PROMPT = "Décris cette image en détail."
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = None
 if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = None
-if "pending_prompt" not in st.session_state:
-    st.session_state.pending_prompt = None
+if "pending_image" not in st.session_state:
+    st.session_state.pending_image = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 
 def show_login_page():
@@ -131,11 +135,15 @@ def ensure_active_session(username: str):
 def start_new_chat(username: str, project_id: int = None):
     new_id = create_session(username, project_id=project_id)
     st.session_state.current_session_id = new_id
+    st.session_state.pending_image = None
+    st.session_state.uploader_key += 1
     st.rerun()
 
 
 def switch_session(session_id: int):
     st.session_state.current_session_id = session_id
+    st.session_state.pending_image = None
+    st.session_state.uploader_key += 1
     st.rerun()
 
 
@@ -225,6 +233,7 @@ def show_chat_page():
     current_project_id, current_project_name = get_current_project(
         all_sessions, all_projects, st.session_state.current_session_id
     )
+    session_id = st.session_state.current_session_id
 
     with st.sidebar:
         st.header(f"👤 {username}")
@@ -235,13 +244,11 @@ def show_chat_page():
             st.rerun()
 
         st.divider()
-
         if st.button("➕ Nouvelle conversation", use_container_width=True):
             start_new_chat(username)
 
         st.divider()
         st.subheader("📁 Projets")
-
         with st.expander("➕ Créer un nouveau projet"):
             new_project_name = st.text_input("Nom du projet", key="new_project_name")
             if st.button("Créer", key="create_project_btn"):
@@ -255,14 +262,11 @@ def show_chat_page():
             expander_label = f"📁 {project_name} ({len(project_sessions)})"
             if is_active_project:
                 expander_label = f"➡️ {expander_label} — actif"
-
             with st.expander(expander_label, expanded=is_active_project):
                 if st.button("➕ Nouvelle conversation ici", key=f"new_in_project_{project_id}"):
                     start_new_chat(username, project_id=project_id)
-
-                for session_id, title, created_at, s_project_id in project_sessions:
-                    render_session_row(session_id, title, session_id == st.session_state.current_session_id)
-
+                for s_id, title, created_at, s_project_id in project_sessions:
+                    render_session_row(s_id, title, s_id == st.session_state.current_session_id)
                 if st.button("🗑️ Supprimer ce projet", key=f"delete_project_{project_id}"):
                     delete_project(project_id)
                     st.rerun()
@@ -271,19 +275,18 @@ def show_chat_page():
         st.subheader("🕓 Conversations générales")
         no_project_sessions = [s for s in all_sessions if s[3] is None]
         if no_project_sessions:
-            for session_id, title, created_at, s_project_id in no_project_sessions:
-                render_session_row(session_id, title, session_id == st.session_state.current_session_id)
+            for s_id, title, created_at, s_project_id in no_project_sessions:
+                render_session_row(s_id, title, s_id == st.session_state.current_session_id)
         else:
             st.caption("Aucune conversation hors projet.")
 
         st.divider()
         doc_scope_label = f"projet « {current_project_name} »" if current_project_id else "conversation générale"
         st.subheader(f"📄 Documents ({doc_scope_label})")
-        uploaded_file = st.file_uploader("Fichier (PDF/TXT)", type=["pdf", "txt"], key="doc_uploader")
-        if uploaded_file is not None:
+        uploaded_doc = st.file_uploader("Fichier (PDF/TXT)", type=["pdf", "txt"], key="doc_uploader")
+        if uploaded_doc is not None:
             if st.button("Traiter ce fichier"):
-                process_uploaded_file(uploaded_file, username, project_id=current_project_id)
-
+                process_uploaded_file(uploaded_doc, username, project_id=current_project_id)
         docs = get_user_documents(username, project_id=current_project_id)
         if docs:
             for filename, uploaded_at in docs:
@@ -303,65 +306,79 @@ def show_chat_page():
         selected_label = st.selectbox("Modèle utilisé", list(MODEL_OPTIONS.keys()), key="model_choice")
     model_id = MODEL_OPTIONS[selected_label]
 
-    messages = get_session_messages(st.session_state.current_session_id)
+    messages = get_session_messages(session_id)
     for role, content in messages:
         with st.chat_message(role):
             st.markdown(content)
 
-    # ---- Barre d'outils compacte au-dessus de la saisie : micro seulement ----
-    _, col_mic = st.columns([9, 1])
-    with col_mic:
-        with st.popover("🎤"):
-            st.caption("Enregistre un message vocal")
-            audio_value = st.audio_input("Micro", key="audio_input", label_visibility="collapsed")
-            if audio_value is not None:
-                if st.button("Transcrire et envoyer"):
-                    with st.spinner("Transcription..."):
-                        text = transcribe_audio(audio_value)
-                    st.session_state.pending_prompt = text
-                    st.rerun()
-
-    # ---- Barre de saisie unique avec trombone intégré pour les images ----
-    user_input = st.chat_input(
-        "Pose ta question, ou joins une image avec le trombone...",
-        accept_file=True,
-        file_type=["png", "jpg", "jpeg"],
-    )
-
-    prompt = None
-    image_file = None
-
-    if user_input:
-        prompt = user_input.text
-        if user_input.files:
-            image_file = user_input.files[0]
-    elif st.session_state.pending_prompt:
-        prompt = st.session_state.pending_prompt
-        st.session_state.pending_prompt = None
-
-    if prompt:
-        session_id = st.session_state.current_session_id
+    def handle_send(prompt: str, image_file=None):
+        display_text = prompt if prompt.strip() else "🖼️ (image envoyée sans texte)"
 
         current_titles = {s[0]: s[1] for s in get_sessions(username)}
         if current_titles.get(session_id) == "Nouvelle conversation":
-            new_title = prompt[:40] + ("..." if len(prompt) > 40 else "")
+            title_source = prompt.strip() if prompt.strip() else "Image envoyée"
+            new_title = title_source[:40] + ("..." if len(title_source) > 40 else "")
             update_session_title(session_id, new_title)
 
-        save_message(session_id, "user", prompt)
+        save_message(session_id, "user", display_text)
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(display_text)
             if image_file:
                 st.image(image_file, width=200)
 
         with st.chat_message("assistant"):
             if image_file is not None:
-                answer = answer_with_vision_model(prompt, image_file)
+                final_prompt = prompt.strip() if prompt.strip() else DEFAULT_IMAGE_PROMPT
+                answer = answer_with_vision_model(final_prompt, image_file)
             else:
                 answer = answer_with_text_model(prompt, username, current_project_id, model_id)
             st.markdown(answer)
 
         save_message(session_id, "assistant", answer)
+        st.session_state.pending_image = None
+        st.session_state.uploader_key += 1
         st.rerun()
+
+    col_attach, col_mic, col_preview = st.columns([1, 1, 6])
+
+    with col_attach:
+        with st.popover("📎"):
+            st.caption("Joindre une image")
+            new_image = st.file_uploader(
+                "Image", type=["png", "jpg", "jpeg"],
+                key=f"image_attach_{st.session_state.uploader_key}",
+                label_visibility="collapsed"
+            )
+            if new_image is not None:
+                st.session_state.pending_image = new_image
+
+    with col_mic:
+        with st.popover("🎤"):
+            st.caption("Message vocal" + (" à propos de l'image jointe" if st.session_state.pending_image else ""))
+            audio_value = st.audio_input("Micro", key="audio_input", label_visibility="collapsed")
+            if audio_value is not None:
+                if st.button("Transcrire et envoyer"):
+                    with st.spinner("Transcription en cours..."):
+                        text = transcribe_audio(audio_value)
+                    handle_send(text, image_file=st.session_state.pending_image)
+
+    with col_preview:
+        if st.session_state.pending_image is not None:
+            p1, p2, p3 = st.columns([1, 1, 4])
+            with p1:
+                st.image(st.session_state.pending_image, width=60)
+            with p2:
+                if st.button("✖ Retirer"):
+                    st.session_state.pending_image = None
+                    st.session_state.uploader_key += 1
+                    st.rerun()
+            with p3:
+                if st.button("📤 Envoyer l'image seule (sans texte)"):
+                    handle_send("", image_file=st.session_state.pending_image)
+
+    typed_prompt = st.chat_input("Pose ta question...")
+    if typed_prompt:
+        handle_send(typed_prompt, image_file=st.session_state.pending_image)
 
 
 if st.session_state.logged_in:
